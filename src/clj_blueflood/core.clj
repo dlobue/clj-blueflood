@@ -29,12 +29,10 @@
    (cass-execute query {}))
   ([query opts]
    (let [opts (merge {:consistency :one} opts)]
-     (log/spy
-     (alia/execute (:session @cass-state) query opts))))
-  )
+     (alia/execute-async (:session @cass-state) query opts))))
 
 (defn cass-prepared-insert [& data]
-  (log/info "Inserting the following data: " data)
+  ;(log/info "Inserting the following data: " data)
   (cass-execute (:prepared-insert @cass-state) {:values data}))
 
 (defn init-cass
@@ -44,10 +42,16 @@
   ([options]
    (log/info "Initializing connections to cassandra")
    (let [cluster (alia/cluster {:contact-points (get options :nodes ["localhost"])
-                                :port (get options :port 9042)})
+                                :port (get options :port 9042)
+                                :query-options {:consistency :one}
+                                :pooling-options
+                                {:core-connections-per-host {:remote 16 :local 16}
+                                 :max-connections-per-host {:remote 100 :local 100}
+                                 :max-simultaneous-requests-per-connection {:remote 32 :local 32}
+                                 :min-simultaneous-requests-per-connection {:remote 16 :local 16}}})
          session (alia/connect cluster)]
 
-     (alia/execute session (use-keyspace "DATA"))
+     (alia/execute session (use-keyspace "TESTDATA"))
 
      (reset! cass-state
              {:cluster cluster
@@ -60,27 +64,22 @@
         :let [{:keys [tenantId metricName
                       metricValue collectionTime]} datapoint
               metric-name (str tenantId "." metricName)]]
-    (do
-      (log/spy datapoint)
-      (log/spy
-        (cass-prepared-insert metric-name collectionTime (str metricValue))
-        )))
-  )
+    (cass-prepared-insert metric-name collectionTime (str metricValue))))
 
 
 (defn solo-ingest-handler [req]
   (log/info "I was asked to handle a request for a single tenant")
-  (log/spy (ingest-processor
-    (map #(assoc % :tenantId (get-in req [:params :tenant-id])) (:body req) )))
-
-  (response "blarg"))
+  (for [x (doall (ingest-processor
+                   (map #(assoc % :tenantId (get-in req [:params :tenant-id])) (:body req) )))]
+    @x)
+  (response ""))
 
 
 (defn ingest-handler [req]
   (log/info "OMG A WHALE SHOWED UP!")
-  (response
-  (ingest-processor (:body req))
-    ))
+  (for [x (doall (ingest-processor (:body req)))]
+      @x)
+  (response ""))
 
 
 (defn- json-request? [request]
@@ -135,11 +134,12 @@
 
 
     (log/info "Starting the server - here I go!")
-    (log/spy (map #(assoc % :a 1) [{:b 2} {:c 3} {:d 4}]))
     (init-cass {:nodes (:nodes options)
                 :port (:cass-port options)})
     (log/info "Cassandra has been initialized. Now to give the routes to ring")
-    (run-server root-handler {:port (:port options)})))
+    (run-server root-handler {:port (:port options)
+                              :thread 20
+                              :worker-name-prefix "httpkit-"})))
 
 
 
