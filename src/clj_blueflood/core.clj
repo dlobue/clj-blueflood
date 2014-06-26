@@ -9,8 +9,6 @@
         [ring.middleware.keyword-params :only [wrap-keyword-params]]
         [ring.middleware.nested-params :only [wrap-nested-params]]
         [ring.util.response :only [response status]]
-        ;[compojure.route :only [not-found]]
-        ;[compojure.core :only [defroutes GET POST DELETE ANY context]]
         [qbits.alia :as alia]
         [clojure.tools.cli]
         qbits.hayt
@@ -32,7 +30,6 @@
      (alia/execute-async (:session @cass-state) query opts))))
 
 (defn cass-prepared-insert [& data]
-  ;(log/info "Inserting the following data: " data)
   (cass-execute (:prepared-insert @cass-state) {:values data}))
 
 (defn init-cass
