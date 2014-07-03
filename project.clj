@@ -20,6 +20,9 @@
                                                     javax.jms/jms
                                                     com.sun.jdmk/jmxtools
                                                     com.sun.jmx/jmxri]]
+                 [metrics-clojure "2.1.0"]
+                 [metrics-clojure-ring "2.1.0"]
+                 [com.addthis.metrics/reporter-config "3.0.0-SNAPSHOT"]
                  [org.clojure/core.async "0.1.303.0-886421-alpha"]]
   :main ^:skip-aot clj-blueflood.core
   :target-path "target/%s"
@@ -27,13 +30,12 @@
   :ring {:handler clj-blueflood.core/app}
   :profiles {:uberjar {:aot :all}
              :dev {:dependencies [[javax.servlet/servlet-api "2.5"]
-                                  [alembic "0.2.1"]
-                                  [org.clojure/tools.namespace "0.2.4"]
-                                  [org.slf4j/slf4j-log4j12 "1.7.7"]
-                                  [log4j/log4j "1.2.16"]
+                                  ;[alembic "0.2.1"]
+                                  ;[org.slf4j/slf4j-log4j12 "1.7.7"]
+                                  ;[log4j/log4j "1.2.16"]
                                   ;[http-kit "2.1.16"]
                                   ;[ring/ring-json "0.3.1"]
                                   [ring-mock "0.1.5"]]}}
-  ;:java-source-paths ["src/java"]
+  :java-source-paths ["src/java"]
   ;:javac-options ["-source" "1.6" "-target" "1.6" "-g"]
   )

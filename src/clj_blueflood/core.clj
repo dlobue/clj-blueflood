@@ -1,25 +1,48 @@
 (ns clj-blueflood.core
   (:require [clojure.tools.logging :as log]
             [compojure.core :refer [defroutes GET POST DELETE ANY context]]
-            ;[compojure.handler :as handler]
-            [compojure.route :as route])
+            [compojure.route :as route]
+            [metrics.core :refer [new-registry]]
+            [metrics.ring.instrument :refer [instrument]]
+            [metrics.meters :refer [meter mark!]]
+            [metrics.timers :refer [timer time!]])
 
   (:use [ring.middleware.json :only [wrap-json-body]]
-        [ring.middleware.params :only [wrap-params]]
-        [ring.middleware.keyword-params :only [wrap-keyword-params]]
-        [ring.middleware.nested-params :only [wrap-nested-params]]
+        ;[ring.middleware.params :only [wrap-params]]
+        ;[ring.middleware.keyword-params :only [wrap-keyword-params]]
+        ;[ring.middleware.nested-params :only [wrap-nested-params]]
         [ring.util.response :only [response status]]
         [qbits.alia :as alia]
         [clojure.tools.cli]
         qbits.hayt
         org.httpkit.server)
+  (:import
+    (java.nio ByteBuffer)
+    (com.addthis.metrics.reporter.config ReporterConfig)
+    (com.rackspacecloud.blueflood.io.serializers NumericSerializer))
   (:gen-class))
 
 
+(def registry (new-registry))
 (defonce cass-state (atom {}))
 
-(def insertq
+(def metrics-inserted (meter registry "metrics-inserted"))
+
+(def insertq-old
   (insert :metrics_full (values [[:key ?] [:column1 ?] [:value (text->blob ?)]])))
+
+(def insertq-full
+  (insert :metrics_full (values [[:key ?] [:column1 ?] [:value ?]])))
+
+(def insertq-locator
+  (insert :metrics_locator (values [[:key ?] [:column1 ?] [:value ""]]) (if-not-exists)))
+
+
+(defn metric->blob [m]
+    (let [serializer (NumericSerializer/serializerFor (.getClass m))]
+        (. serializer (toByteBuffer m))))
+
+
 
 
 (defn cass-execute
@@ -29,8 +52,15 @@
    (let [opts (merge {:consistency :one} opts)]
      (alia/execute-async (:session @cass-state) query opts))))
 
-(defn cass-prepared-insert [& data]
-  (cass-execute (:prepared-insert @cass-state) {:values data}))
+(defn cass-prepared-insert-full [metric-name timestamp metric-value]
+  (mark! metrics-inserted)
+  (cass-execute (:prepared-insert-full @cass-state)
+                {:values [metric-name timestamp (if (instance? ByteBuffer metric-value)
+                                                  metric-value
+                                                  (metric->blob metric-value))]}))
+
+(defn cass-prepared-insert-locator [shard metric-name]
+  (cass-execute (:prepared-insert-locator @cass-state) {:values [shard metric-name]}))
 
 (defn init-cass
   ([]
@@ -46,22 +76,28 @@
                                  :max-connections-per-host {:remote 100 :local 100}
                                  :max-simultaneous-requests-per-connection {:remote 32 :local 32}
                                  :min-simultaneous-requests-per-connection {:remote 16 :local 16}}})
-         session (alia/connect cluster)]
+         session (alia/connect cluster)
+         client-registry (-> cluster
+                             .getMetrics
+                             .getRegistry)]
 
+     (. registry (register "datastax" client-registry))
      (alia/execute session (use-keyspace "TESTDATA"))
 
      (reset! cass-state
              {:cluster cluster
               :session session
-              :prepared-insert (alia/prepare session insertq)}) )))
+              :prepared-insert-locator (alia/prepare session insertq-locator)
+              :prepared-insert-full (alia/prepare session insertq-full)}) )))
 
 (defn ingest-processor [datapoints]
-  (log/info "Processing data is what I do!")
   (for [datapoint datapoints
         :let [{:keys [tenantId metricName
                       metricValue collectionTime]} datapoint
-              metric-name (str tenantId "." metricName)]]
-    (cass-prepared-insert metric-name collectionTime (str metricValue))))
+              metric-name (str tenantId "." metricName)]
+        :when (not (or (instance? String metricValue)
+                       (instance? Boolean metricValue)))]
+    (cass-prepared-insert-full metric-name collectionTime metricValue)))
 
 
 (defn solo-ingest-handler [req]
@@ -92,22 +128,21 @@
 
 
 (defroutes api-routes
+  (POST "/echo" [] (fn [req] (response (:body req))))
   (POST "/v1.0/multitenant/experimental/metrics" [] 
-        (wrap-enforce-json-content-type ingest-handler))
+        ingest-handler)
+        ;(wrap-enforce-json-content-type ingest-handler))
   (POST "/v1.0/:tenant-id/experimental/metrics" [] 
-        (wrap-enforce-json-content-type solo-ingest-handler))
+        solo-ingest-handler)
+        ;(wrap-enforce-json-content-type solo-ingest-handler))
   (GET "/init-cass" [] (fn [_] (init-cass)))
   (route/not-found "<p>Page not blarg!.</p>")) ;; all other, return 404
 
 
 (def root-handler
   (-> api-routes
-      wrap-keyword-params
-      wrap-nested-params
-      wrap-params
-      (wrap-json-body {:keywords? true :bigdecimals? true})
-      ;(wrap-json-response)
-      ))
+      (instrument registry)
+      (wrap-json-body {:keywords? true :bigdecimals? false})))
 
 (defn app [p]
   (log/info "Starting the server - here I go!")
@@ -123,6 +158,9 @@
              ["-p" "--port" "Port to listen on." :default 8080 :parse-fn #(Integer. %)]
              ["-n" "--nodes" "Addresses of cassandra nodes" :default ["localhost"] :parse-fn #(vec (.split % ","))]
              ["-P" "--cass-port" "Cassandra port" :default 9042 :parse-fn #(Integer. %)]
+             ["-t" "--threads" "Number of http threads" :default 4 :parse-fn #(Integer. %)]
+             ["-q" "--queue-size" "Max number of requests to queue waiting for a thread" :default 204800 :parse-fn #(Integer. %)]
+             ["-r" "--reporter-config" "Metrics reporter config location" :default false]
              )]
     (when (:help options)
       (do
@@ -133,10 +171,14 @@
     (log/info "Starting the server - here I go!")
     (init-cass {:nodes (:nodes options)
                 :port (:cass-port options)})
+
+    (when (:reporter-config options)
+      (-> (ReporterConfig/loadFromFileAndValidate (:reporter-config options))
+          (.enableAll registry)))
+
     (log/info "Cassandra has been initialized. Now to give the routes to ring")
     (run-server root-handler {:port (:port options)
-                              :thread 20
+                              :thread (:threads options)
+                              :queue-size (:queue-size options)
                               :worker-name-prefix "httpkit-"})))
-
-
 
