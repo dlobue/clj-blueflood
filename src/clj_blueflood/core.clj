@@ -55,9 +55,13 @@
 (defn cass-prepared-insert-full [metric-name timestamp metric-value]
   (mark! metrics-inserted)
   (cass-execute (:prepared-insert-full @cass-state)
-                {:values [metric-name timestamp (if (instance? ByteBuffer metric-value)
+                {:values [metric-name
+                          (if (> 2000000000 timestamp)
+                            (* 1000 timestamp)
+                            timestamp)
+                          (if (instance? ByteBuffer metric-value)
                                                   metric-value
-                                                  (metric->blob metric-value))]}))
+                                                  (metric->blob metric-value)) ]}))
 
 (defn cass-prepared-insert-locator [shard metric-name]
   (cass-execute (:prepared-insert-locator @cass-state) {:values [shard metric-name]}))
