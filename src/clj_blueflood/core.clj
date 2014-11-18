@@ -133,10 +133,16 @@
 
 (defroutes api-routes
   (POST "/echo" [] (fn [req] (response (:body req))))
-  (POST "/v1.0/multitenant/experimental/metrics" [] 
+  (POST "/v2.0/:tenant-id/ingest/multi" []
         ingest-handler)
         ;(wrap-enforce-json-content-type ingest-handler))
-  (POST "/v1.0/:tenant-id/experimental/metrics" [] 
+  (POST "/v2.0/:tenant-id/ingest" []
+        solo-ingest-handler)
+        ;(wrap-enforce-json-content-type solo-ingest-handler))
+  (POST "/v1.0/multitenant/experimental/metrics" []
+        ingest-handler)
+        ;(wrap-enforce-json-content-type ingest-handler))
+  (POST "/v1.0/:tenant-id/experimental/metrics" []
         solo-ingest-handler)
         ;(wrap-enforce-json-content-type solo-ingest-handler))
   (GET "/init-cass" [] (fn [_] (init-cass)))
